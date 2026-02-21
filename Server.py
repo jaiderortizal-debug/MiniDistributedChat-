@@ -1,15 +1,12 @@
-import socket
-import threading
+import socket, threading
 
+# Configuración del servidor
+HOST = "0.0.0.0"   # Escucha en todas las interfaces de red disponibles
+PUERTO = 5000      # Puerto donde el servidor aceptará conexiones
+clientes = {}      # Diccionario que guardará los sockets de los clientes y sus nombres
+lock = threading.Lock()  # Candado para evitar conflictos cuando varios hilos acceden a 'clientes'
 
-HOST = "0.0.0.0"   
-PUERTO = 5000
-
-
-clientes = {}        # { socket: nombre }
-lock = threading.Lock()  
-
-
+# Función para enviar un mensaje a todos los clientes conectados (menos el que lo envía, si se indica)
 def broadcast(mensaje, origen_socket=None):
     with lock:
         for cliente_socket in list(clientes.keys()):
@@ -17,31 +14,26 @@ def broadcast(mensaje, origen_socket=None):
                 try:
                     cliente_socket.send(mensaje.encode("utf-8"))
                 except Exception:
-                    # Si falla el envío, ignorar (ya se manejará en su hilo)
+                    # Si hay algún error al enviar (cliente desconectado), simplemente ignorar
                     pass
 
-
+# Función que maneja la comunicación con un cliente individual
 def manejar_cliente(cliente_socket, direccion):
     print(f"[+] Nueva conexión desde {direccion}")
     nombre = None
-
     try:
         while True:
-            # Recibir mensaje del cliente (hasta 1024 bytes)
             datos = cliente_socket.recv(1024)
-
-            # Si recv devuelve vacío, el cliente cerró la conexión
             if not datos:
+                # Si no llega nada, el cliente se desconectó
                 break
 
             mensaje = datos.decode("utf-8").strip()
             print(f"[DEBUG] Recibido de {direccion}: {mensaje}")
 
-            #Protocolo de comandos ─
-            if mensaje.startswith("JOIN "):
-                # JOIN <nombre>
+            # Si el cliente quiere unirse con un nombre
+            if mensaje.upper().startswith("JOIN "):
                 nombre_solicitado = mensaje[5:].strip()
-
                 with lock:
                     nombres_activos = list(clientes.values())
 
@@ -54,82 +46,69 @@ def manejar_cliente(cliente_socket, direccion):
                     with lock:
                         clientes[cliente_socket] = nombre
                     cliente_socket.send(f"OK Bienvenido al chat, {nombre}!\n".encode("utf-8"))
-                    broadcast(f"[SERVIDOR] {nombre} se ha unido al chat.\n", cliente_socket)
+                    broadcast(f"\n[SERVIDOR] {nombre} se ha unido al chat.\n", cliente_socket)
                     print(f"[+] {nombre} se unió desde {direccion}")
 
-            elif mensaje.startswith("MSG "):
-                # MSG <texto>
+            # Si el cliente envía un mensaje
+            elif mensaje.upper().startswith("MSG "):
                 if nombre is None:
                     cliente_socket.send("ERROR Debes hacer JOIN primero.\n".encode("utf-8"))
                 else:
                     texto = mensaje[4:].strip()
                     if texto:
-                        broadcast(f"[{nombre}]: {texto}\n", cliente_socket)
-                        cliente_socket.send(f"[Tú]: {texto}\n".encode("utf-8"))
+                        broadcast(f"\n[{nombre}]: {texto}\n", cliente_socket)  # A otros clientes
+                        cliente_socket.send(f"[Tú]: {texto}\n".encode("utf-8"))  # A sí mismo
 
-            elif mensaje == "EXIT":
-                # EXIT — el cliente se despide correctamente
+            # Si el cliente quiere salir
+            elif mensaje.upper() == "EXIT":
                 cliente_socket.send("OK Hasta luego!\n".encode("utf-8"))
                 break
 
+            # Cualquier otro comando desconocido
             else:
                 cliente_socket.send("ERROR Comando desconocido. Usa: JOIN <nombre> | MSG <texto> | EXIT\n".encode("utf-8"))
 
-    except ConnectionResetError:
+    except ConnectionResetError:  # Si el cliente se desconecta abruptamente
         print(f"[-] Conexión interrumpida desde {direccion}")
     except Exception as e:
         print(f"[ERROR] {direccion}: {e}")
     finally:
-        #  Limpieza: eliminar cliente de la lista ─
+        # Limpiar la conexión
         with lock:
             if cliente_socket in clientes:
                 del clientes[cliente_socket]
-        cliente_socket.close()
 
+        cliente_socket.close()
         if nombre:
             broadcast(f"[SERVIDOR] {nombre} ha abandonado el chat.\n")
             print(f"[-] {nombre} desconectado de {direccion}")
         else:
             print(f"[-] Cliente anónimo desconectado de {direccion}")
 
-
-def iniciar_servidor():
-    servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-    # Permite reusar el puerto si el servidor se reinicia rápido
-    servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-    servidor.bind((HOST, PUERTO))
-    servidor.listen()
-
-    print("=" * 45)
-    print("  ✅ MiniDistributedChat — SERVIDOR")
-    print(f"  Escuchando en {HOST}:{PUERTO}")
-    print("  Esperando clientes... (Ctrl+C para salir)")
-    print("=" * 45)
-
+def main():
+    servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # Crear socket TCP
+    servidor.bind((HOST, PUERTO))  # Asocia el socket a la IP y puerto
+    servidor.listen()  # Escucha conexiones entrantes
+    print(f"Escuchando en {HOST}:{PUERTO}")
+    print("Esperando clientes... (Ctrl+C para salir)")
     try:
-        while True:
-            # accept() bloquea hasta que llega un cliente
-            cliente_socket, direccion = servidor.accept()
-
-        
+        while True:  # Bucle principal para aceptar conexiones
+            cliente_socket, direccion = servidor.accept()  # Espera a que un cliente se conecte
             hilo = threading.Thread(
                 target=manejar_cliente,
                 args=(cliente_socket, direccion),
-                daemon=True  # El hilo muere si el servidor cierra
+                daemon=True  # El hilo se cerrará automáticamente cuando termine el programa
             )
-            hilo.start()
+            hilo.start()  # Inicia el hilo para manejar al cliente
 
             with lock:
                 total = len(clientes)
-            print(f"[INFO] Clientes conectados actualmente: {total}")
-
+            print(f"[INFO] Clientes conectados actualmente: {total+1}")
     except KeyboardInterrupt:
         print("\n[!] Servidor apagado por el administrador.")
     finally:
-        servidor.close()
+        servidor.close()  # Cerrar el socket al salir
 
-
+#  Arranca el servidor si se ejecuta directamente este archivo
 if __name__ == "__main__":
-    iniciar_servidor()
+    main()
